@@ -10,138 +10,86 @@ import random
 from sklearn.model_selection import train_test_split
 
 from torch.utils.data import DataLoader, Dataset
+from im2spec_dataset import augmented_dataset
 
-from im2spec_models import *
+
+
+def spectral_mismatch_error(pred_spectra, spectra):
+
+    mse = np.mean(np.abs((pred_spectra - spectra)), axis=1)
+
+    return mse
 
 def norm_0to1(arr):
     arr = np.asarray(arr)
     arr = (arr - arr.min()) / (arr.max() - arr.min())
     return arr
 
+def distance_acq_fn(distances, beta = 0.5, lambda_ = 1, optimize = "custom_fn", sample_next_points = 10, exclude_indices = []):
 
-def train_model(model, imgs_train, spectra_train, n_epochs = 100):
-
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-
-    n_epochs = 100
-
-    train_loss = []
-
-    model.train()
-
-    train_images = torch.tensor(imgs_train, dtype=torch.float32)
-    train_spectra = torch.tensor(spectra_train, dtype=torch.float32)
-
-
-    for epoch in range(n_epochs):
-        
-        optimizer.zero_grad()
-        outputs = model(train_images)
-        loss = criterion(outputs, train_spectra)
-
-        loss.backward()
-        optimizer.step()
-
-        train_loss.append(loss.item())
-
-
-    model.eval()
-
-    return model, train_loss
-
-
-def train_model_ensemble(model, dataset, n_epochs = 100):
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    criterion = nn.MSELoss()
-    
-    optimizers = [torch.optim.Adam(submodel.parameters(), lr=0.1) for submodel in model.models]
-
-    train_loss = []
-
-    model.train()
-
-    dataloader = DataLoader(dataset, batch_size = len(dataset)//3, shuffle = True)
-
-
-    for epoch in range(n_epochs):
-
-        for train_images, train_spectra in dataloader:
-            
-            train_images, train_spectra = train_images.to(device), train_spectra.to(device)
-            
-            loss_vector = []
-            
-            for idx, submodel in enumerate(model.models):
-
-                optimizers[idx].zero_grad()
-                
-                output = submodel(train_images)
-            
-                loss = criterion(output, train_spectra)
-
-                loss.backward()
-                optimizers[idx].step()
-
-                loss_vector.append(loss.item())
-
-
-        train_loss.append(loss_vector)
-
-
-    model.eval()
-
-    return model, train_loss
+    distances = np.ravel(np.asarray(distances))
+    acq_vals = norm_0to1(distances)
 
 
 
-def train_error_ensemble(model, dataset, n_epochs = 100):
+    if optimize == "minimize":
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    criterion = nn.MSELoss()
-    
-    optimizers = [torch.optim.Adam(submodel.parameters(), lr=0.1) for submodel in model.models]
-
-    train_loss = []
-
-    model.train()
-
-    dataloader = DataLoader(dataset, batch_size = 1 + len(dataset)//3, shuffle = True)
+        acq_vals[exclude_indices] = 2
+        aq_ind = np.argsort(acq_vals)
 
 
-    for epoch in range(n_epochs):
+    elif optimize == "maximize":
 
-        for train_images, error_vector in dataloader:
+        acq_vals[exclude_indices] = -1
+        aq_ind = np.argsort(acq_vals)[::-1]
 
-            train_images, error_vector = train_images.to(device), error_vector.to(device)
-        
-            loss_vector = []
-            
-            for idx, submodel in enumerate(model.models):
+    elif optimize == "custom_fn":
 
-                optimizers[idx].zero_grad()
-                
-                output = submodel(train_images)
-            
-                loss = criterion(output, error_vector[:, idx])
+                    # EXPLORATION + EXPLOITATION
+        acq_vals = (1-np.exp(-lambda_ * np.abs(acq_vals-(1-beta))))
+        acq_vals = norm_0to1(acq_vals)
 
-                loss.backward()
-                optimizers[idx].step()
+        #acq_vals = beta*(1- np.exp(-lambda_ * distances)) + (1-beta)*np.exp(-lambda_ * distances)
 
-                loss_vector.append(loss.item())
+        acq_vals[exclude_indices] = -1
+        aq_ind = np.argsort(acq_vals)[::-1]
+
+    else:
+        raise ValueError('Invalid optimization type')
 
 
-        train_loss.append(loss_vector)
+    aq_ind = aq_ind[:sample_next_points]
 
 
-    model.eval()
+    return aq_ind, acq_vals
 
-    return model, train_loss
+def append_training_set(images, spectra, next_index, imgs_train, spectra_train, indices_train):
+
+    imgs_train = np.append(imgs_train, images[next_index].reshape(1, images.shape[1], images.shape[2], 1), axis = 0)
+
+    spectra_train = np.append(spectra_train, spectra[next_index].reshape(1, spectra.shape[1]), axis = 0)
+
+    indices_train = np.append(indices_train, next_index)
+
+    return imgs_train, spectra_train, indices_train
+
+
+
+def augmented_dataset_numpy(images, spectra):
+
+    images = images[:, :, :, 0]
+
+    dataset = augmented_dataset(images, spectra)
+    dataloader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
+
+    for images, spectra in dataloader:
+        images = images.numpy()
+        spectra = spectra.numpy()
+
+    images = images[..., np.newaxis]
+
+    return images, spectra
+
 
 
 def err_estimation(model, images, spectra):
@@ -163,32 +111,7 @@ def err_estimation(model, images, spectra):
     return error_mean, error_std, error_vector
 
 
-def acquisition_fn(error_mean, error_std, beta = 1, index_exclude = [], sample_next_point = 1):
-    
-    aq_fn = beta * error_mean + error_std
 
-    aq_fn = np.asarray(aq_fn)
-    
-    aq_fn[index_exclude] = 1
-
-    # acq_val_min = aq_fn.min()
-
-    # acq_ind = [index for index, acq_val in enumerate(aq_fn) if acq_val == acq_val_min]
-
-    aq_ind = np.argsort(aq_fn)[:sample_next_point]  # sort indices in ascending order of the acquisition function and select the first sample_next_point indices
-
-    return aq_ind, aq_fn
-
-
-def append_training_set(images, spectra, next_index, imgs_train, spectra_train, indices_train):
-
-    imgs_train = np.append(imgs_train, images[next_index].reshape(1, images.shape[1], images.shape[2]), axis = 0)
-
-    spectra_train = np.append(spectra_train, spectra[next_index].reshape(1, spectra.shape[1]), axis = 0)
-    
-    indices_train = np.append(indices_train, next_index)
-
-    return imgs_train, spectra_train, indices_train
 
 
 def error_dataset(model, images, spectra, norm = True):
