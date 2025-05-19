@@ -10,9 +10,9 @@ import random
 from sklearn.model_selection import train_test_split
 
 from torch.utils.data import DataLoader, Dataset
-from im2spec_dataset import augmented_dataset
+#from im2spec_dataset import augmented_dataset
 
-
+ 
 
 def spectral_mismatch_error(pred_spectra, spectra):
 
@@ -75,20 +75,7 @@ def append_training_set(images, spectra, next_index, imgs_train, spectra_train, 
 
 
 
-def augmented_dataset_numpy(images, spectra):
 
-    images = images[:, :, :, 0]
-
-    dataset = augmented_dataset(images, spectra)
-    dataloader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
-
-    for images, spectra in dataloader:
-        images = images.numpy()
-        spectra = spectra.numpy()
-
-    images = images[..., np.newaxis]
-
-    return images, spectra
 
 
 
